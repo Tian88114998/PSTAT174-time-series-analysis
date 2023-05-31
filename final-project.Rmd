@@ -1,0 +1,399 @@
+---
+title: "PSTAT174FinalProject"
+author: "Tianhong Liu"
+date: "2023-05-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Step 1: Import and Visualize the Data
+
+```{r}
+library(MASS)
+# load the data
+raw <- read.csv("job-openings1.csv")
+# extract the daily data
+data_day <- raw$IHLIDXNEWUS
+# plot the time series of the daily data
+data_day.ts <- ts(data_day)
+ts.plot(data_day.ts)
+hist(data_day.ts)
+```
+
+The steps that made me decide to convert to weekly data
+
+```{r}
+# stabilize the variance using box-cox transformation
+t <- 1:length(data_day.ts)
+fit <- lm(data_day.ts ~ t)
+bcTransform <- boxcox(data_day.ts ~ t, plotit = TRUE, lambda = seq(-1,5))
+lambda = bcTransform$x[which(bcTransform$y == max(bcTransform$y))]
+data.bc = (1/lambda)*(data_day.ts^lambda-1)
+ts.plot(data.bc,main = "Box-Cox tranformed data", ylab = expression(Y[t]))
+hist(data.bc)
+```
+
+```{r}
+# remove the trend by differencing once at lag 1
+var(data.bc)
+y1 <- diff(data.bc, 1)
+var(y1)
+ts.plot(y1, main = "Daily Data after Differenced once at Lag 1", ylab = expression(Y[t]))
+
+# though the variance dropped, there are still big spikes in the plot and it doesn't look at a stationary process
+```
+
+```{r}
+# remove the trend by differencing again at lag 1
+y11 <- diff(y1, 1)
+var(y11)
+ts.plot(y11, main = "Daily Data after Differenced twice at Lag 2", ylab = expression(Y[t]))
+# though the variance dropped, the spikes look more terrifying. Go back to y1.
+```
+
+```{r}
+# lets see the acf and pacf of y1
+op <- par(mfrow = c(1,2))
+acf(y1, lag.max = 60)
+pacf(y1, lag.max = 60)
+# acf tells us there could a seasonality at lag 7 which makes sense based on our prior knowledge: 7 days is a week, and Mondays could have similarities.
+```
+
+```{r}
+# Difference y1 once at lag 7
+y17 <- diff(y1, 7)
+var(y17)
+ts.plot(y17, main = "Daily Data after Differenced once at Lag 1 and Lag 7", ylab = expression(Y[t]))
+```
+
+```{r}
+op <- par(mfrow = c(1,2))
+acf(y17, lag.max = 60)
+pacf(y17, lag.max = 60)
+# However, the acf still shows the data has some seasonality. And the data and the acf look almost the same as the one before differencing at lag 7.
+```
+
+```{r}
+# Maybe we should difference again at lag 7
+y177 <- diff(y17, 7)
+var(y177)
+ts.plot(y177, main = "Daily Data after Differenced once at Lag 1 and twice at Lag 7", ylab = expression(Y[t]))
+op <- par(mfrow = c(1,2))
+acf(y177, lag.max = 60)
+pacf(y177, lag.max = 60)
+# the result get worse since the variance increases. Also, there is no obvious changes in the acf and the data plot. This brings us to the conclusion that the daily data may be too noisy, which also corresponds to our prior understandings, and maybe it is not suitable for the SARIMA model. 
+```
+
+The daily data looks fuzzy since there are a lot of noise in daily data. Also, it is hard to make it stationary by de-trending and de-seasonalizing. Moreover, speaking as policy makers, we may be more interesting in predicting what are the new job openings in the next few weeks than those on tomorrow. Thus, we will first convert daily data to weekly data by averaging the data every 7 days.
+
+#### Convert daily data to weekly data by averaging each week
+
+```{r}
+# check the length of the daily data: 855 data
+length(data_day) 
+length(data_day) %% 7
+# drop the last data so the length can be divided by 7
+data_day <- data_day[-length(data_day)]
+data_week <- c()
+# convert to weekly data by averaging daily data every 7 days
+for (i in 1:(length(data_day)/7)) {
+  sum_i <- sum(data_day[i:i+7])/7
+  data_week <- append(data_week, sum_i)
+} 
+# plot the time series of the weekly data
+data_week.ts <- ts(data_week)
+plot(data_week.ts, main = "Weekly Job Openings from 2021-01-01 to 2023-05-12", ylab = "Number of Positions", xlab = "Number of Weeks", cex.main=0.8)
+hist(data_week.ts)
+# plot the acf of the weekly data
+acf(data_week.ts, lag.max = 60)
+```
+
+Now the weekly data seems to be easier to deal with. The next step is to remove its trend and seasonality, but before that lets separate the weekly data into training and testing data.
+
+```{r}
+# check the length of the weekly data: 12 data
+length(data_week.ts)
+# lets take 10 last data as our testing data and the rest 111 data as training data
+train <- data_week.ts[1:111]
+length(train)
+test <- data_week.ts[112:121]
+length(test)
+```
+
+### Step 2: Make it Stationary
+
+1.  Stabilize the variance
+
+```{r}
+library(MASS)
+t <- 1:length(train)
+fit <- lm(train ~ t)
+bcTransform <- boxcox(train ~ t, plotit = TRUE)
+# since lambda lies in the 95% confidence interval that contains 0, we use log transformation instead 
+
+# lambda = bcTransform$x[which(bcTransform$y == max(bcTransform$y))] 
+# data.bc = (1/lambda)*(data_week.ts^lambda-1)
+# ts.plot(data.bc,main = "Box-Cox tranformed data", ylab = expression(Y[t]))
+
+train.log <- ts(log(train))
+ts.plot(train.log, main = "Log Transformed Training Data", ylab = expression(Y[t]))
+hist(train.log)
+```
+
+Detrend the data by differencing once at lag 1
+
+```{r}
+y1 <- diff(train.log, 1)
+var(y1)
+plot(y1,main = "De-trended Time Series By Differencing Once at Lag 1",ylab = expression(nabla~Y[t])) 
+abline(h = 0,lty = 2)
+# fit the trend
+t <- 1:length(y1)
+fit <- lm(y1 ~ t)
+# plot the trend
+abline(fit, col = "red")
+# plot the mean
+abline(h = mean(y1), col = "blue")
+hist(y1)
+```
+
+Plot the acf and pacf of the data after differencing once at lag 1.
+
+```{r}
+op <- par(mfrow = c(1,2))
+acf(y1, lag.max = 30)
+pacf(y1, lag.max = 30)
+```
+
+The data plot doesn't seem to be stationary enough, especially at the beginning. The acf plot also shows a trend. Maybe we should difference once at lag 1 again.
+
+```{r}
+y11 = diff(y1, 1)
+plot(y11,main = "De-trended Time Series by Differencing Twice at Lag 1",ylab = expression(nabla~Y[t])) 
+abline(h = 0,lty = 2)
+var(y11)
+
+# goal: reduce the variance, easy to model. Overdifferencing.
+
+t <- 1:length(y11)
+fit <- lm(y11 ~ t)
+abline(fit, col = "red")
+abline(h = mean(y11), col = "blue")
+hist(y11)
+```
+
+```{r}
+op <- par(mfrow = c(1,2))
+acf(y11, lag.max = 30)
+pacf(y11, lag.max = 30)
+```
+
+What if we difference it again at lag 1?
+
+```{r}
+y111 = diff(y11, 1)
+plot(y111,main = "De-trended Time Series by Differencing Thrice at Lag 1",ylab = expression(nabla~Y[t])) 
+abline(h = 0,lty = 2)
+var(y111)
+t <- 1:length(y111)
+fit <- lm(y111 ~ t)
+abline(fit, col = "red")
+abline(h = mean(y111), col = "blue")
+hist(y111)
+```
+
+```{r}
+op <- par(mfrow = c(1,2))
+acf(y111, lag.max = 30)
+pacf(y111, lag.max = 30)
+```
+
+The variance actually went up and the pacf plot looks scary. Lets go back to `y11`.
+
+??? The acf and pacf of `y11` are significant at lag $7$ and $14$. This suggests that there could be a seasonality of $7$. Therefore, difference `y11` at lag $7$ once.
+
+```{r}
+y117 <- diff(y11, 7)
+plot(y117,main = "De-trended Time Series by Differencing Twice at Lag 1 and Once at Lag 7",ylab = expression(nabla~Y[t]), cex.main = 0.8) 
+abline(h = 0,lty = 2)
+var(y117)
+```
+
+Plot the acf and pacf of `y117`.
+
+```{r}
+op <- par(mfrow = c(1,2))
+acf(y117, lag.max = 30)
+pacf(y117, lag.max = 30)
+```
+
+???
+
+`y11` shows significant acfs at lag $1$, $7$, $13$, $14$ and significant pacfs at lag $7$, $11$, $13$. Then, we can select several candidate model and fit different ARMA model using maximum likelihood estimation and compare the model fits using AICC.
+
+```{r}
+op <- par(mfrow = c(1,2))
+acf(y11, lag.max = 30)
+pacf(y11, lag.max = 30)
+```
+
+```{r}
+fit <- arima(train.log, order = c(14, 2, 13), seasonal = list(order = c(0,0,0)), method = "ML")
+fit
+```
+
+```{r}
+options(rgl.useNULL=TRUE)
+library("qpcR")
+AICc(fit)
+```
+
+```{r warning=FALSE}
+# select candidate models
+df <- expand.grid(p = 0:3, q = 0:3, P = 0:2, Q = 0:2)
+df <- cbind(df, AICc = NA)
+
+# compute the AICc
+for (i in 1:nrow(df)){
+  sarima.obj <- NULL
+  try(arima.obj <- arima(train.log, order=c(df$p[i], 2, df$q[i]),
+                          seasonal=list(order=c(df$P[i], 0, df$Q[i]), period=7),
+    method="ML"))
+  if (!is.null(arima.obj)) { df$AICc[i] <- AICc(arima.obj) }
+}
+top_3 <- head(df[order(df$AICc),], n = 3)
+top_3
+```
+
+We get the lowest AICc when p = 2, q = 4, P = 1, and Q = 0. We also have two other candidate models that have slightly bigger AICc. Now we fit the model.
+
+```{r}
+ind <- 130
+fit <- arima(train.log, order=c(df$p[ind], 2, df$q[ind]),
+             seasonal=list(order=c(df$P[ind], 0, df$Q[ind]), period=7),
+             fixed = c(NA,0,NA,NA,NA),
+             method="ML")
+fit
+AICc(fit)
+```
+
+```{r}
+ind <- 143
+fit <- arima(train.log, order=c(df$p[ind], 2, df$q[ind]),
+             seasonal=list(order=c(df$P[ind], 0, df$Q[ind]), period=7),
+             method="ML")
+fit
+AICc(fit)
+```
+
+We can write out the model. Let $$
+Y_t = \nabla_1^2\ln(U_t) = (1-B)^2\ln(U_t)
+$$ where $U_t$ is the original data and $Y_t$ is the data after log-transformation and two differences at lag $1$, then $$
+(1-0.2633B)(1+0.5438B^{14})Y_t = (1-1.0389B^7 + 0.5833B^{14})Z_t
+$$
+
+```{r}
+# sanity check
+# check if the model is stationary and invertible
+polyroot(c(1,-0.2633))
+polyroot(c(1,0.5438))
+polyroot(c(1,-1.0389, 0.5833))
+source("plot_roots.R")
+plot.roots(NULL, polyroot(c(1,-1.0389, 0.5833)))
+```
+
+Now we perform the diagnostic checking
+
+```{r}
+res <- residuals(fit)
+mean(res)
+var(res)
+
+par(mfrow=c(1, 1))
+ts.plot(res, main="Fitted Residuals")
+t <- 1:length(res)
+fit.res = lm(res~ t)
+abline(fit.res)
+abline(h = mean(res), col = "red")
+```
+
+```{r}
+# ACF and PACF of the residuals
+par(mfrow=c(1, 2))
+acf(res, main="Autocorrelation")
+pacf(res, main="Partial Autocorrelation")
+```
+
+```{r}
+# we also use the hypothesis tests
+
+# Box-Pierce test
+length = length(train.log)
+lag = length ** 0.5
+Box.test(res, lag = 11, type = c("Box-Pierce"), fitdf = 4)
+
+# Box-Ljung test
+Box.test(res, lag = 11, type = c("Ljung-Box"), fitdf = 4)
+
+# McLeod-Li test
+Box.test(res**2, lag = 11, type = c("Ljung-Box"), fitdf = 0)
+```
+
+```{r}
+# use shapiro-wilk test to test to normality of the residuals
+shapiro.test(res)
+```
+
+```{r}
+# Histogram and QQ-plot:
+par(mfrow=c(1,2))
+hist(res,main = "Histogram")
+qqnorm(res)
+qqline(res,col ="blue")
+```
+
+The model has passed all the diagnostic checking and then we can make predictions
+
+```{r}
+# predict the next 10 observations using the model
+mypred <- predict(fit, n.ahead = 10)
+ts.plot(train, xlim = c(100, length(train.log) + 12), ylim=c(18, 26))
+points((length(train.log) + 0):(length(train.log) + 9), col = "red",
+       exp(mypred$pred))
+lines((length(train.log) + 0):(length(train.log) + 9), col = "blue",
+       exp(mypred$pred + 1.96 * mypred$se))
+lines((length(train.log) + 0):(length(train.log) + 9), col = "blue",
+       exp(mypred$pred - 1.96 * mypred$se))
+lines((length(train.log) + 0):(length(train.log) + 9), col = "black",
+       test, lty = 3)
+```
+
+```{r}
+mypred <- predict(fit, n.ahead = 10)
+ts.plot(train, xlim = c(1, length(train.log) + 10), ylim=c(15, 26))
+points((length(train.log) + 0):(length(train.log) + 9), col = "red",
+       exp(mypred$pred), cex = 0.5)
+lines((length(train.log) + 0):(length(train.log) + 9), col = "blue",
+       exp(mypred$pred + 1.96 * mypred$se))
+lines((length(train.log) + 0):(length(train.log) + 9), col = "blue",
+       exp(mypred$pred - 1.96 * mypred$se))
+lines((length(train.log) + 0):(length(train.log) + 9), col = "black",
+       test, lty = 3)
+```
+
+```{r}
+library(tsdl)
+# subject of the data
+tsdl_data <- tsdl[[400]]
+attr(tsdl_data, "subject")
+# source of the data
+attr(tsdl_data, "source")
+# description of the data
+attr(tsdl_data, "description")
+# length of the data
+length(tsdl_data)
+ts.plot(tsdl_data)
+```
